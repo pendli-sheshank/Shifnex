@@ -505,14 +505,15 @@ struct JobGoalTrackerCard: View {
     let shifts: [Shift]
     var weekOffset: Int = 0
 
-    private var cycleStart: Date {
-        let base = Date(timeIntervalSince1970: Double(job.getStartOfCurrentCycle()) / 1000.0)
-        return Calendar.current.date(byAdding: .weekOfYear, value: weekOffset, to: base) ?? base
+    // Step by whole cycles, not fixed weeks, so a biweekly or monthly job pages
+    // through real pay periods.
+    private var cycle: PayCycle {
+        payCycle(for: job, at: Date(), offset: weekOffset)
     }
 
-    private var cycleEnd: Date {
-        Calendar.current.date(byAdding: .day, value: 7, to: cycleStart) ?? cycleStart
-    }
+    private var cycleStart: Date { cycle.start }
+
+    private var cycleEnd: Date { cycle.end }
 
     private var shiftsForJob: [Shift] {
         let now = Date()
@@ -535,10 +536,17 @@ struct JobGoalTrackerCard: View {
         DashboardViewModel.calculateEarningsWithOvertime(shifts: shiftsForJob, job: job).overtime
     }
 
+    // goalHours is entered and stored as a WEEKLY target. Comparing it straight
+    // against a fortnight's or a month's totals would under-report progress by half
+    // or more, so scale it to the cycle's real length.
+    private var cycleGoal: Double {
+        proRateWeeklyGoal(job.goalHours, cycle: cycle)
+    }
+
     private var progressFraction: Double {
-        guard job.goalHours > 0 else { return 0 }
+        guard cycleGoal > 0 else { return 0 }
         let actual = job.goalType == "Hours" ? hours : earnings
-        return min(max(actual / job.goalHours, 0), 1)
+        return min(max(actual / cycleGoal, 0), 1)
     }
 
     private var accentColor: Color { job.isGigWork ? .accentOrange : .accentBlue }
@@ -601,13 +609,13 @@ struct JobGoalTrackerCard: View {
 
             // Progress
             HStack {
-                Text("Weekly \(job.goalType) Target")
+                Text("\(PayFrequency.label(job.payFrequency)) \(job.goalType) Target")
                     .font(.system(size: 12))
                     .foregroundColor(.secondary)
                 Spacer()
                 Text(job.goalType == "Hours"
-                     ? String(format: "%.1f/%.0fh", hours, job.goalHours)
-                     : String(format: "$%.0f/$%.0f", earnings, job.goalHours))
+                     ? String(format: "%.1f/%.0fh", hours, cycleGoal)
+                     : String(format: "$%.0f/$%.0f", earnings, cycleGoal))
                     .font(.system(size: 12, weight: .bold))
                     .foregroundColor(progressFraction >= 1.0 ? .primaryGreen : .primary)
             }

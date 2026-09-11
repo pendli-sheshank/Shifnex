@@ -34,6 +34,43 @@ fun resolveGlobalWeekStartDay(jobs: List<Job>): String {
     return dayOrder.first { counts[it] == maxCount }
 }
 
+/**
+ * How often an employer pays out.
+ *
+ * Stored as a plain string on [Job] to match the other Firestore-backed fields, with
+ * the enum used only in logic. `WEEKLY` is the default so every job created before pay
+ * frequency existed keeps exactly the cycle boundaries it already had.
+ */
+enum class PayFrequency {
+    WEEKLY,
+    BIWEEKLY,
+    MONTHLY;
+
+    companion object {
+        const val WEEKLY_VALUE = "WEEKLY"
+        const val BIWEEKLY_VALUE = "BIWEEKLY"
+        const val MONTHLY_VALUE = "MONTHLY"
+
+        val ALL_VALUES = listOf(WEEKLY_VALUE, BIWEEKLY_VALUE, MONTHLY_VALUE)
+
+        /** Unknown or missing values fall back to weekly rather than failing a payroll read. */
+        fun from(raw: String?): PayFrequency = when (raw?.uppercase()) {
+            BIWEEKLY_VALUE -> BIWEEKLY
+            MONTHLY_VALUE -> MONTHLY
+            else -> WEEKLY
+        }
+
+        fun isValid(raw: String?): Boolean = raw != null && raw.uppercase() in ALL_VALUES
+
+        /** User-facing label for the pay-frequency picker on both platforms. */
+        fun label(raw: String?): String = when (from(raw)) {
+            WEEKLY -> "Weekly"
+            BIWEEKLY -> "Biweekly"
+            MONTHLY -> "Monthly"
+        }
+    }
+}
+
 data class Job(
     var id: String = "",
     var userId: String = "",
@@ -43,6 +80,11 @@ data class Job(
     var goalHours: Double = 20.0,
     var goalType: String = "Hours",
     var weeklyCycleStartDay: String? = "Monday",
+    // How long a pay period is. Weekly by default so existing jobs are unaffected.
+    var payFrequency: String = PayFrequency.WEEKLY_VALUE,
+    // Start of one known pay period, used only by BIWEEKLY to decide which of the two
+    // alternating weeks begins a period. Null on every job predating this field.
+    var payCycleAnchorMillis: Long? = null,
     var overtimeThresholdHours: Double = 40.0,
     var overtimeMultiplier: Double = 1.5,
     var bonusAmount: Double = 0.0,

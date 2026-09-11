@@ -321,7 +321,7 @@ final class DashboardViewModel: ObservableObject {
 
     // MARK: - Job CRUD
 
-    func addJob(title: String, isGigWork: Bool, defaultHourlyRate: Double, goalHours: Double, goalType: String, weeklyCycleStartDay: String = "Monday", overtimeThresholdHours: Double = 40.0, overtimeMultiplier: Double = 1.5, bonusAmount: Double = 0.0, bonusReason: String = "") {
+    func addJob(title: String, isGigWork: Bool, defaultHourlyRate: Double, goalHours: Double, goalType: String, weeklyCycleStartDay: String = "Monday", payFrequency: String = PayFrequency.weekly.rawValue, payCycleAnchorMillis: Int64? = nil, overtimeThresholdHours: Double = 40.0, overtimeMultiplier: Double = 1.5, bonusAmount: Double = 0.0, bonusReason: String = "") {
         guard let uid = service.currentUserId else {
             syncError = "Please sign in to add employers."
             return
@@ -335,6 +335,8 @@ final class DashboardViewModel: ObservableObject {
             goalHours: goalHours,
             goalType: goalType,
             weeklyCycleStartDay: weeklyCycleStartDay,
+            payFrequency: Self.normalizePayFrequency(payFrequency),
+            payCycleAnchorMillis: Self.resolveAnchor(payFrequency, payCycleAnchorMillis, weeklyCycleStartDay),
             overtimeThresholdHours: overtimeThresholdHours,
             overtimeMultiplier: overtimeMultiplier,
             bonusAmount: bonusAmount,
@@ -344,7 +346,19 @@ final class DashboardViewModel: ObservableObject {
         service.addJob(job)
     }
 
-    func updateJob(jobId: String, title: String, isGigWork: Bool, defaultHourlyRate: Double, goalHours: Double, goalType: String, weeklyCycleStartDay: String, overtimeThresholdHours: Double = 40.0, overtimeMultiplier: Double = 1.5, bonusAmount: Double = 0.0, bonusReason: String = "") {
+    private static func normalizePayFrequency(_ raw: String?) -> String {
+        PayFrequency.isValid(raw) ? raw!.uppercased() : PayFrequency.weekly.rawValue
+    }
+
+    // Biweekly is the only frequency that needs an anchor, and it needs a real one:
+    // leaving it nil would let the boundary depend on when it was first evaluated.
+    // Persist the most recent cycle start day so the user can see and correct it.
+    private static func resolveAnchor(_ frequency: String?, _ supplied: Int64?, _ weeklyCycleStartDay: String?) -> Int64? {
+        guard PayFrequency.from(frequency) == .biweekly else { return nil }
+        return supplied ?? defaultBiweeklyAnchorMillis(weeklyCycleStartDay: weeklyCycleStartDay)
+    }
+
+    func updateJob(jobId: String, title: String, isGigWork: Bool, defaultHourlyRate: Double, goalHours: Double, goalType: String, weeklyCycleStartDay: String, payFrequency: String = PayFrequency.weekly.rawValue, payCycleAnchorMillis: Int64? = nil, overtimeThresholdHours: Double = 40.0, overtimeMultiplier: Double = 1.5, bonusAmount: Double = 0.0, bonusReason: String = "") {
         guard let existing = jobs.first(where: { $0.id == jobId }) else { return }
         var updated = existing
         updated.title = title
@@ -353,6 +367,14 @@ final class DashboardViewModel: ObservableObject {
         updated.goalHours = goalHours
         updated.goalType = goalType
         updated.weeklyCycleStartDay = weeklyCycleStartDay
+        updated.payFrequency = Self.normalizePayFrequency(payFrequency)
+        // Keep the job's existing anchor when one is already stored, so editing an
+        // unrelated field can't silently shift every past pay period by a week.
+        updated.payCycleAnchorMillis = Self.resolveAnchor(
+            payFrequency,
+            payCycleAnchorMillis ?? existing.payCycleAnchorMillis,
+            weeklyCycleStartDay
+        )
         updated.overtimeThresholdHours = overtimeThresholdHours
         updated.overtimeMultiplier = overtimeMultiplier
         updated.bonusAmount = bonusAmount
@@ -584,8 +606,9 @@ final class DashboardViewModel: ObservableObject {
             }
 
             // Add current cycle if not seen
-            let currentCycleStart = job.getStartOfCurrentCycle(targetDate: now)
-            let currentCycleEnd = currentCycleStart + 7 * 24 * 60 * 60 * 1000
+            let currentCycle = payCycle(for: job, at: now)
+            let currentCycleStart = currentCycle.startMillis
+            let currentCycleEnd = currentCycle.endMillis
             if seenCycles.insert(currentCycleStart).inserted {
                 let startDate = Date(timeIntervalSince1970: Double(currentCycleStart) / 1000)
                 let endDate = Date(timeIntervalSince1970: Double(currentCycleEnd - 1000) / 1000)
@@ -600,37 +623,18 @@ final class DashboardViewModel: ObservableObject {
         }
     }
 
+    // The pay period a shift belongs to, honouring the employer's pay frequency.
+    // Delegates to the single boundary implementation in PayCycleCalculator.swift.
     private func getCycleStartAndEnd(forShiftStartTime startTime: Int64, jobs: [Job]) -> (Int64, Int64) {
         let shiftDate = Date(timeIntervalSince1970: Double(startTime) / 1000)
-        let calendar = Calendar.current
 
         // Find matching job by company name (already matched externally, but look up cycle start day)
         let job = jobs.first { $0.title.caseInsensitiveCompare(
             shifts.first(where: { $0.startTime == startTime })?.company ?? "") == .orderedSame }
+            ?? Job(weeklyCycleStartDay: "Monday")
 
-        let startDayName = job?.weeklyCycleStartDay ?? "Monday"
-        let targetWeekday = dayOfWeekNumber(from: startDayName)
-
-        var date = calendar.startOfDay(for: shiftDate)
-        while calendar.component(.weekday, from: date) != targetWeekday {
-            date = calendar.date(byAdding: .day, value: -1, to: date)!
-        }
-
-        let cycleStart = Int64(date.timeIntervalSince1970 * 1000)
-        return (cycleStart, cycleStart + 7 * 24 * 60 * 60 * 1000)
-    }
-
-    private func dayOfWeekNumber(from name: String) -> Int {
-        switch name.lowercased() {
-        case "sunday":    return 1
-        case "monday":    return 2
-        case "tuesday":   return 3
-        case "wednesday": return 4
-        case "thursday":  return 5
-        case "friday":    return 6
-        case "saturday":  return 7
-        default:          return 2
-        }
+        let cycle = payCycle(for: job, at: shiftDate)
+        return (cycle.startMillis, cycle.endMillis)
     }
 
     // MARK: - Fiscal week start
@@ -653,14 +657,12 @@ final class DashboardViewModel: ObservableObject {
     }
 
     // Start-of-day of the most recent weekStartDay on or before the given date.
+    // Deliberately always weekly: this backs the cross-job aggregate views (dashboard
+    // "this week" card, widget, unfiltered insights), which summarise a week rather
+    // than any single employer's pay period.
     func startOfWeek(containing date: Date, weekStartDay: String) -> Date {
-        let calendar = Calendar.current
-        let targetWeekday = dayOfWeekNumber(from: weekStartDay)
-        var day = calendar.startOfDay(for: date)
-        while calendar.component(.weekday, from: day) != targetWeekday {
-            day = calendar.date(byAdding: .day, value: -1, to: day)!
-        }
-        return day
+        let weeklyJob = Job(weeklyCycleStartDay: weekStartDay, payFrequency: PayFrequency.weekly.rawValue)
+        return payCycle(for: weeklyJob, at: date).start
     }
 
     // MARK: - Insights
