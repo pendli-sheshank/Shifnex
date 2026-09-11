@@ -86,9 +86,9 @@ Security rules are in `firestore.rules`.
 
 **Every code change must bump the fallback version code** in `androidApp/build.gradle.kts`:
 ```kotlin
-val ciVersionCode = (System.getenv("VERSION_CODE") ?: "91").toInt()
+val ciVersionCode = (System.getenv("VERSION_CODE") ?: "92").toInt()
 ```
-CI sets `VERSION_CODE` from the GitHub run number + 100. The fallback (currently 91) must be incremented with each release to avoid Play Store "version code already used" errors.
+CI sets `VERSION_CODE` from the GitHub run number + 100. The fallback (currently 92) must be incremented with each release to avoid Play Store "version code already used" errors.
 
 ## CI/CD
 

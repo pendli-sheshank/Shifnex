@@ -51,36 +51,26 @@ struct Job: Identifiable, Codable, Equatable, Hashable {
     var goalHours: Double = 20.0
     var goalType: String = "Hours"
     var weeklyCycleStartDay: String? = "Monday"
+    /// How long a pay period is: WEEKLY | BIWEEKLY | MONTHLY. Weekly by default so
+    /// every job created before pay frequency existed keeps its current boundaries.
+    var payFrequency: String = PayFrequency.weekly.rawValue
+    /// Start of one known pay period, in epoch millis. Only BIWEEKLY reads it — a
+    /// weekday alone can't say which of the two alternating weeks opens a period.
+    var payCycleAnchorMillis: Int64? = nil
     var overtimeThresholdHours: Double = 40.0
     var overtimeMultiplier: Double = 1.5
     var bonusAmount: Double = 0.0
     var bonusReason: String = ""
 
+    /// Start of the pay period containing `targetDate`, honouring this job's frequency.
+    /// Delegates to the single boundary implementation in `PayCycleCalculator.swift`.
     func getStartOfCurrentCycle(targetDate: Date = Date()) -> Int64 {
-        let calendar = Calendar.current
-        var date = calendar.startOfDay(for: targetDate)
-
-        let targetDay = dayOfWeek(from: weeklyCycleStartDay ?? "Monday")
-
-        while calendar.component(.weekday, from: date) != targetDay {
-            date = calendar.date(byAdding: .day, value: -1, to: date)!
-        }
-
-        return Int64(date.timeIntervalSince1970 * 1000.0)
+        payCycle(for: self, at: targetDate).startMillis
     }
 
-    /// Returns weekday integer (1=Sunday, 2=Monday, ... 7=Saturday) matching Calendar convention
-    private func dayOfWeek(from name: String) -> Int {
-        switch name.lowercased() {
-        case "sunday":    return 1
-        case "monday":    return 2
-        case "tuesday":   return 3
-        case "wednesday": return 4
-        case "thursday":  return 5
-        case "friday":    return 6
-        case "saturday":  return 7
-        default:          return 2
-        }
+    /// The full pay period containing `targetDate`.
+    func currentCycle(targetDate: Date = Date()) -> PayCycle {
+        payCycle(for: self, at: targetDate)
     }
 }
 
@@ -430,6 +420,8 @@ final class FirebaseService {
                         goalHours: data["goalHours"] as? Double ?? 20.0,
                         goalType: data["goalType"] as? String ?? "Hours",
                         weeklyCycleStartDay: data["weeklyCycleStartDay"] as? String ?? "Monday",
+                        payFrequency: data["payFrequency"] as? String ?? PayFrequency.weekly.rawValue,
+                        payCycleAnchorMillis: (data["payCycleAnchorMillis"] as? NSNumber)?.int64Value,
                         overtimeThresholdHours: data["overtimeThresholdHours"] as? Double ?? 40.0,
                         overtimeMultiplier: data["overtimeMultiplier"] as? Double ?? 1.5,
                         bonusAmount: data["bonusAmount"] as? Double ?? 0.0,
@@ -470,7 +462,7 @@ final class FirebaseService {
     }
 
     private func jobToDict(_ j: Job) -> [String: Any] {
-        return [
+        var dict: [String: Any] = [
             "id": j.id,
             "userId": j.userId,
             "title": j.title,
@@ -479,11 +471,18 @@ final class FirebaseService {
             "goalHours": j.goalHours,
             "goalType": j.goalType,
             "weeklyCycleStartDay": j.weeklyCycleStartDay ?? "Monday",
+            "payFrequency": j.payFrequency,
             "overtimeThresholdHours": j.overtimeThresholdHours,
             "overtimeMultiplier": j.overtimeMultiplier,
             "bonusAmount": j.bonusAmount,
             "bonusReason": j.bonusReason
         ]
+        // Only biweekly jobs carry an anchor; writing NSNull for the others would
+        // store a field the Android reader has to special-case.
+        if let anchor = j.payCycleAnchorMillis {
+            dict["payCycleAnchorMillis"] = anchor
+        }
+        return dict
     }
 
     // MARK: - Pay Adjustments

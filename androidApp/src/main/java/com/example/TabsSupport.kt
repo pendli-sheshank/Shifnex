@@ -62,6 +62,8 @@ import java.util.*
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import com.schedulo.shared.model.TeamShift
+import com.schedulo.shared.model.PayFrequency
+import com.schedulo.shared.logic.defaultBiweeklyAnchorMillis
 import com.schedulo.shared.model.ShiftTask
 
 @Composable
@@ -1054,7 +1056,14 @@ fun JobsScreen(modifier: Modifier = Modifier, dashboardViewModel: DashboardViewM
     var bonusAmountStr by remember { mutableStateOf("0.0") }
     var bonusReasonStr by remember { mutableStateOf("") }
     var daysExpanded by remember { mutableStateOf(false) }
+    var payFrequency by remember { mutableStateOf(PayFrequency.WEEKLY_VALUE) }
+    var payCycleAnchorMillis by remember { mutableStateOf<Long?>(null) }
+    var frequencyExpanded by remember { mutableStateOf(false) }
     val daysOfWeek = remember { listOf("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday") }
+    val anchorFormat = remember { SimpleDateFormat("EEE, MMM dd", Locale.US) }
+    // Pay-cycle range labels use the app-wide "MMM dd" form so every statement-style
+    // date reads the same across screens.
+    val jobCycleFormat = remember { SimpleDateFormat("MMM dd", Locale.US) }
 
     if (showDialog) {
         AlertDialog(
@@ -1075,14 +1084,64 @@ fun JobsScreen(modifier: Modifier = Modifier, dashboardViewModel: DashboardViewM
                             modifier = Modifier.fillMaxWidth(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), shape = RoundedCornerShape(12.dp))
 
                         Box(modifier = Modifier.fillMaxWidth()) {
-                            OutlinedTextField(value = weeklyCycleStartDay, onValueChange = {}, label = { Text("Weekly Cycle Start Day") },
+                            OutlinedTextField(value = PayFrequency.label(payFrequency), onValueChange = {}, label = { Text("Pay Frequency") },
                                 readOnly = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp),
-                                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = daysExpanded) })
-                            Box(modifier = Modifier.matchParentSize().clickable { daysExpanded = true })
-                            DropdownMenu(expanded = daysExpanded, onDismissRequest = { daysExpanded = false }) {
-                                daysOfWeek.forEach { day ->
-                                    DropdownMenuItem(text = { Text(day) }, onClick = { weeklyCycleStartDay = day; daysExpanded = false })
+                                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = frequencyExpanded) })
+                            Box(modifier = Modifier.matchParentSize().clickable { frequencyExpanded = true })
+                            DropdownMenu(expanded = frequencyExpanded, onDismissRequest = { frequencyExpanded = false }) {
+                                PayFrequency.ALL_VALUES.forEach { value ->
+                                    DropdownMenuItem(text = { Text(PayFrequency.label(value)) }, onClick = {
+                                        payFrequency = value
+                                        // Offer a sensible starting fortnight the moment biweekly is
+                                        // picked, so the field is never silently empty.
+                                        if (value == PayFrequency.BIWEEKLY_VALUE && payCycleAnchorMillis == null) {
+                                            payCycleAnchorMillis = defaultBiweeklyAnchorMillis(
+                                                weeklyCycleStartDay, System.currentTimeMillis()
+                                            )
+                                        }
+                                        frequencyExpanded = false
+                                    })
                                 }
+                            }
+                        }
+
+                        // Monthly pay periods are calendar months, so the start day is
+                        // meaningless there and is hidden rather than quietly ignored.
+                        if (payFrequency != PayFrequency.MONTHLY_VALUE) {
+                            Box(modifier = Modifier.fillMaxWidth()) {
+                                OutlinedTextField(value = weeklyCycleStartDay, onValueChange = {}, label = { Text("Cycle Start Day") },
+                                    readOnly = true, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp),
+                                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = daysExpanded) })
+                                Box(modifier = Modifier.matchParentSize().clickable { daysExpanded = true })
+                                DropdownMenu(expanded = daysExpanded, onDismissRequest = { daysExpanded = false }) {
+                                    daysOfWeek.forEach { day ->
+                                        DropdownMenuItem(text = { Text(day) }, onClick = {
+                                            weeklyCycleStartDay = day
+                                            // Re-anchor to the new day so boundaries stay on it.
+                                            if (payFrequency == PayFrequency.BIWEEKLY_VALUE) {
+                                                payCycleAnchorMillis = defaultBiweeklyAnchorMillis(day, System.currentTimeMillis())
+                                            }
+                                            daysExpanded = false
+                                        })
+                                    }
+                                }
+                            }
+                        }
+
+                        // Which of the two alternating weeks opens a period can't be
+                        // derived from a weekday, so show the resolved one and let the
+                        // user shift it by a week if their employer is on the other.
+                        if (payFrequency == PayFrequency.BIWEEKLY_VALUE) {
+                            val anchor = payCycleAnchorMillis
+                                ?: defaultBiweeklyAnchorMillis(weeklyCycleStartDay, System.currentTimeMillis())
+                            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text("Current period started", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Text(anchorFormat.format(Date(anchor)), fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                                }
+                                TextButton(onClick = {
+                                    payCycleAnchorMillis = anchor - 7L * 24 * 60 * 60 * 1000L
+                                }) { Text("Shift a week") }
                             }
                         }
 
@@ -1123,8 +1182,8 @@ fun JobsScreen(modifier: Modifier = Modifier, dashboardViewModel: DashboardViewM
                     val finalOTM = overtimeMultiplierStr.toDoubleOrNull() ?: 1.5
                     val finalBonus = if (isGigWork) 0.0 else (bonusAmountStr.toDoubleOrNull() ?: 0.0)
                     val finalBonusReason = if (isGigWork) "" else bonusReasonStr
-                    if (editingJobId == null) dashboardViewModel.addJob(title, isGigWork, finalRate, finalGoal, goalType, weeklyCycleStartDay, finalOT, finalOTM, finalBonus, finalBonusReason)
-                    else dashboardViewModel.updateJob(editingJobId!!, title, isGigWork, finalRate, finalGoal, goalType, weeklyCycleStartDay, finalOT, finalOTM, finalBonus, finalBonusReason)
+                    if (editingJobId == null) dashboardViewModel.addJob(title, isGigWork, finalRate, finalGoal, goalType, weeklyCycleStartDay, payFrequency, payCycleAnchorMillis, finalOT, finalOTM, finalBonus, finalBonusReason)
+                    else dashboardViewModel.updateJob(editingJobId!!, title, isGigWork, finalRate, finalGoal, goalType, weeklyCycleStartDay, payFrequency, payCycleAnchorMillis, finalOT, finalOTM, finalBonus, finalBonusReason)
                     showDialog = false
                 }, colors = ButtonDefaults.buttonColors(containerColor = PrimaryGreen)) { Text("Save") }
             },
@@ -1167,9 +1226,10 @@ fun JobsScreen(modifier: Modifier = Modifier, dashboardViewModel: DashboardViewM
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
                 items(jobs) { job ->
-                    val cycleStart = job.getStartOfCurrentCycle()
-                    val cycleEnd = cycleStart + 7 * 24 * 60 * 60 * 1000L
                     val now = System.currentTimeMillis()
+                    val cycle = payCycleFor(job, now)
+                    val cycleStart = cycle.startMillis
+                    val cycleEnd = cycle.endMillis
                     val jobShifts = shifts.filter {
                         it.company.equals(job.title, ignoreCase = true) && it.startTime >= cycleStart && it.startTime < cycleEnd && it.startTime < now
                     }
@@ -1177,6 +1237,7 @@ fun JobsScreen(modifier: Modifier = Modifier, dashboardViewModel: DashboardViewM
                         modifier = Modifier.fillMaxWidth().clickable {
                             editingJobId = job.id; title = job.title; isGigWork = job.isGigWork; rateStr = job.defaultHourlyRate.toString()
                             goalHoursStr = job.goalHours.toString(); goalType = job.goalType; weeklyCycleStartDay = job.weeklyCycleStartDay ?: "Monday"
+                            payFrequency = job.payFrequency; payCycleAnchorMillis = job.payCycleAnchorMillis
                             overtimeThresholdStr = job.overtimeThresholdHours.toString(); overtimeMultiplierStr = job.overtimeMultiplier.toString()
                             bonusAmountStr = job.bonusAmount.toString(); bonusReasonStr = job.bonusReason
                             showDialog = true
@@ -1215,12 +1276,20 @@ fun JobsScreen(modifier: Modifier = Modifier, dashboardViewModel: DashboardViewM
                             if (!job.isGigWork) {
                                 Spacer(modifier = Modifier.height(6.dp))
                                 val cycleStartDay = job.weeklyCycleStartDay ?: "Monday"
-                                Text("Pay Cycle: $cycleStartDay to ${
-                                    when (cycleStartDay.lowercase(Locale.US)) {
-                                        "monday" -> "Sunday"; "tuesday" -> "Monday"; "wednesday" -> "Tuesday"; "thursday" -> "Wednesday"
-                                        "friday" -> "Thursday"; "saturday" -> "Friday"; "sunday" -> "Saturday"; else -> "Sunday"
-                                    }
-                                }", fontSize = 12.sp, color = PrimaryGreen, fontWeight = FontWeight.SemiBold)
+                                // Show the real period rather than a fixed weekday pair: a
+                                // monthly job has no start weekday, and a biweekly one spans
+                                // two weeks, so a "Friday to Thursday" label would be wrong.
+                                val cycleLabel = when (PayFrequency.from(job.payFrequency)) {
+                                    PayFrequency.MONTHLY -> "Monthly: ${jobCycleFormat.format(Date(cycleStart))} – ${jobCycleFormat.format(Date(cycleEnd - 1000L))}"
+                                    PayFrequency.BIWEEKLY -> "Biweekly: ${jobCycleFormat.format(Date(cycleStart))} – ${jobCycleFormat.format(Date(cycleEnd - 1000L))}"
+                                    PayFrequency.WEEKLY -> "Weekly: $cycleStartDay to ${
+                                        when (cycleStartDay.lowercase(Locale.US)) {
+                                            "monday" -> "Sunday"; "tuesday" -> "Monday"; "wednesday" -> "Tuesday"; "thursday" -> "Wednesday"
+                                            "friday" -> "Thursday"; "saturday" -> "Friday"; "sunday" -> "Saturday"; else -> "Sunday"
+                                        }
+                                    }"
+                                }
+                                Text("Pay Cycle: $cycleLabel", fontSize = 12.sp, color = PrimaryGreen, fontWeight = FontWeight.SemiBold)
                             }
                         }
                     }
@@ -1233,6 +1302,7 @@ fun JobsScreen(modifier: Modifier = Modifier, dashboardViewModel: DashboardViewM
             onClick = {
                 editingJobId = null; title = ""; isGigWork = false; rateStr = "15.0"; goalHoursStr = "20.0"
                 goalType = "Hours"; weeklyCycleStartDay = "Monday"; overtimeThresholdStr = "40.0"; overtimeMultiplierStr = "1.5"
+                payFrequency = PayFrequency.WEEKLY_VALUE; payCycleAnchorMillis = null
                 bonusAmountStr = "0.0"; bonusReasonStr = ""
                 showDialog = true
             },
@@ -1270,19 +1340,15 @@ data class WeeklyPayCycle(val startDate: Long, val endDate: Long, val employer: 
     val cycleKey: String get() = "${employer}_${startDate}"
 }
 
+// The pay period a shift belongs to, honouring the employer's pay frequency.
+// Delegates to the shared, unit-tested calculator — the boundary math has one
+// implementation on purpose. A shift whose employer has no matching job falls back
+// to weekly Monday cycles, as it always has.
 fun getCycleStartAndEndForShift(shift: Shift, jobs: List<Job>): Pair<Long, Long> {
     val job = jobs.firstOrNull { it.title.lowercase(Locale.US) == shift.company.lowercase(Locale.US) }
-    val startDay = job?.weeklyCycleStartDay ?: "Monday"
-    val calendar = Calendar.getInstance()
-    calendar.timeInMillis = shift.startTime
-    calendar.set(Calendar.HOUR_OF_DAY, 0); calendar.set(Calendar.MINUTE, 0); calendar.set(Calendar.SECOND, 0); calendar.set(Calendar.MILLISECOND, 0)
-    val targetDayOfWeek = when (startDay.lowercase(Locale.US)) {
-        "sunday" -> Calendar.SUNDAY; "monday" -> Calendar.MONDAY; "tuesday" -> Calendar.TUESDAY; "wednesday" -> Calendar.WEDNESDAY
-        "thursday" -> Calendar.THURSDAY; "friday" -> Calendar.FRIDAY; "saturday" -> Calendar.SATURDAY; else -> Calendar.MONDAY
-    }
-    while (calendar.get(Calendar.DAY_OF_WEEK) != targetDayOfWeek) { calendar.add(Calendar.DAY_OF_YEAR, -1) }
-    val cycleStart = calendar.timeInMillis
-    return Pair(cycleStart, cycleStart + 7L * 24 * 60 * 60 * 1000L)
+        ?: Job(weeklyCycleStartDay = "Monday")
+    val cycle = payCycleFor(job, shift.startTime)
+    return Pair(cycle.startMillis, cycle.endMillis)
 }
 
 fun groupShiftsIntoCycles(shifts: List<Shift>, jobs: List<Job>, now: Long): List<WeeklyPayCycle> {
@@ -1407,7 +1473,7 @@ fun PayScreen(modifier: Modifier = Modifier, dashboardViewModel: DashboardViewMo
         }
 
         if (cycles.isNotEmpty()) {
-            item { Text("Weekly Payroll Cycles", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onBackground); Spacer(modifier = Modifier.height(12.dp)) }
+            item { Text("Payroll Cycles", fontSize = 20.sp, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onBackground); Spacer(modifier = Modifier.height(12.dp)) }
             items(cycles) { cycle ->
                 val cycleRangeStr = "${cycleFormat.format(Date(cycle.startDate))} – ${cycleFormat.format(Date(cycle.endDate - 1000L))}"
                 val holdEndMillis = cycle.endDate + 4L * 24 * 60 * 60 * 1000L

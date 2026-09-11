@@ -249,6 +249,48 @@ describe('schedule-assignment notifications', () => {
   });
 });
 
+describe('job pay-cycle fields', () => {
+  const jobDoc = (overrides = {}) => ({
+    userId: MEMBER,
+    title: 'Cafe',
+    defaultHourlyRate: 15,
+    goalHours: 40,
+    weeklyCycleStartDay: 'Friday',
+    ...overrides,
+  });
+
+  it('a job with no pay-cycle fields is still accepted', async () => {
+    // Older app versions don't send them, and both clients write whole documents.
+    await assertSucceeds(setDoc(doc(ctxFor(MEMBER), 'jobs', 'j2'), jobDoc()));
+  });
+  it('the three supported frequencies are accepted', async () => {
+    for (const [i, freq] of ['WEEKLY', 'BIWEEKLY', 'MONTHLY'].entries()) {
+      await assertSucceeds(
+        setDoc(doc(ctxFor(MEMBER), 'jobs', `jf${i}`), jobDoc({ payFrequency: freq }))
+      );
+    }
+  });
+  it('an unknown frequency is rejected', async () => {
+    await assertFails(setDoc(doc(ctxFor(MEMBER), 'jobs', 'j2'), jobDoc({ payFrequency: 'FORTNIGHTLY' })));
+  });
+  it('a lowercase frequency is rejected', async () => {
+    // The clients uppercase before writing; accepting both spellings would let two
+    // representations of the same cycle into the data.
+    await assertFails(setDoc(doc(ctxFor(MEMBER), 'jobs', 'j2'), jobDoc({ payFrequency: 'weekly' })));
+  });
+  it('a biweekly anchor is accepted and a malformed one is not', async () => {
+    await assertSucceeds(setDoc(doc(ctxFor(MEMBER), 'jobs', 'j2'),
+      jobDoc({ payFrequency: 'BIWEEKLY', payCycleAnchorMillis: 1751515200000 })));
+    await assertFails(setDoc(doc(ctxFor(MEMBER), 'jobs', 'j3'),
+      jobDoc({ payFrequency: 'BIWEEKLY', payCycleAnchorMillis: 'last friday' })));
+    await assertFails(setDoc(doc(ctxFor(MEMBER), 'jobs', 'j4'),
+      jobDoc({ payFrequency: 'BIWEEKLY', payCycleAnchorMillis: -1 })));
+  });
+  it('another user still cannot create a job for someone else', async () => {
+    await assertFails(setDoc(doc(ctxFor(OUTSIDER), 'jobs', 'j2'), jobDoc()));
+  });
+});
+
 describe('feedback submissions', () => {
   const report = (overrides = {}) => ({
     id: 'f2',

@@ -34,6 +34,16 @@ service cloud.firestore {
         && (!('workEndMinutes' in data) || (data.workEndMinutes is int && data.workEndMinutes >= 0 && data.workEndMinutes <= 1440));
     }
 
+    // Pay-cycle fields on a job. Both are optional: every job created before pay
+    // frequency existed lacks them, and both clients write the whole document on
+    // every save, so requiring them would reject writes from older app versions.
+    function jobPayCycleFieldsValid(data) {
+      return (!('payFrequency' in data)
+          || data.payFrequency in ['WEEKLY', 'BIWEEKLY', 'MONTHLY'])
+        && (!('payCycleAnchorMillis' in data)
+          || (data.payCycleAnchorMillis is int && data.payCycleAnchorMillis >= 0));
+    }
+
     // Profiles: users can only read/write their own profile
     match /profiles/{userId} {
       allow read: if request.auth != null && request.auth.uid == userId;
@@ -98,7 +108,8 @@ service cloud.firestore {
         && request.resource.data.defaultHourlyRate is number
         && request.resource.data.defaultHourlyRate >= 0
         && request.resource.data.goalHours is number
-        && request.resource.data.goalHours >= 0;
+        && request.resource.data.goalHours >= 0
+        && jobPayCycleFieldsValid(request.resource.data);
       allow update: if request.auth != null
         && resource.data.userId == request.auth.uid
         && request.resource.data.userId == request.auth.uid
@@ -107,7 +118,8 @@ service cloud.firestore {
         && request.resource.data.defaultHourlyRate is number
         && request.resource.data.defaultHourlyRate >= 0
         && request.resource.data.goalHours is number
-        && request.resource.data.goalHours >= 0;
+        && request.resource.data.goalHours >= 0
+        && jobPayCycleFieldsValid(request.resource.data);
       allow delete: if request.auth != null && resource.data.userId == request.auth.uid;
     }
 

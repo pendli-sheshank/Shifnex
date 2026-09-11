@@ -73,7 +73,7 @@ struct PayView: View {
                 }
 
                 if !cycles.isEmpty {
-                    Text("Weekly Payroll Cycles")
+                    Text("Payroll Cycles")
                         .font(.system(size: 20, weight: .bold))
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, 16)
@@ -637,15 +637,17 @@ struct PayView: View {
         let jobs = dashboardViewModel.jobs
         let now = Date()
 
-        // Group shifts by (employer, cycleStart) so each employer gets separate cycles
-        var cyclesMap: [String: (start: Date, employer: String, shifts: [Shift])] = [:]
+        // Group shifts by (employer, cycleStart) so each employer gets separate cycles.
+        // The period end is carried through rather than recomputed as start + 7 days,
+        // which would collapse biweekly and monthly cycles back to a week.
+        var cyclesMap: [String: (start: Date, end: Date, employer: String, shifts: [Shift])] = [:]
 
         for shift in nonGigShifts {
-            let (start, _) = cycleStartAndEnd(for: shift, jobs: jobs)
+            let (start, end) = cycleStartAndEnd(for: shift, jobs: jobs)
             let employer = shift.company
             let key = "\(employer.lowercased())_\(start.timeIntervalSince1970)"
             if cyclesMap[key] == nil {
-                cyclesMap[key] = (start: start, employer: employer, shifts: [shift])
+                cyclesMap[key] = (start: start, end: end, employer: employer, shifts: [shift])
             } else {
                 cyclesMap[key]!.shifts.append(shift)
             }
@@ -657,7 +659,7 @@ struct PayView: View {
             let start = entry.start
             let shiftList = entry.shifts
             let employer = entry.employer
-            let end = Calendar.current.date(byAdding: .day, value: 7, to: start)!
+            let end = entry.end
             let holdEnd = end.addingTimeInterval(holdDays)
 
             let status: PayCycleStatus = {
@@ -679,33 +681,15 @@ struct PayView: View {
         .sorted { $0.startDate > $1.startDate }
     }
 
+    // The pay period a shift belongs to, honouring the employer's pay frequency.
+    // Delegates to the single boundary implementation in PayCycleCalculator.swift.
+    // A shift whose employer has no matching job falls back to weekly Monday cycles,
+    // as it always has.
     private func cycleStartAndEnd(for shift: Shift, jobs: [Job]) -> (Date, Date) {
         let job = jobs.first { $0.title.lowercased() == shift.company.lowercased() }
-        let startDay = job?.weeklyCycleStartDay ?? "Monday"
-        let cal = Calendar.current
-        var date = cal.startOfDay(for: shift.startDate)
-
-        let targetWeekday = weekdayNumber(for: startDay)
-
-        while cal.component(.weekday, from: date) != targetWeekday {
-            date = cal.date(byAdding: .day, value: -1, to: date)!
-        }
-
-        let end = cal.date(byAdding: .day, value: 7, to: date)!
-        return (date, end)
-    }
-
-    private func weekdayNumber(for day: String) -> Int {
-        switch day.lowercased() {
-        case "sunday": return 1
-        case "monday": return 2
-        case "tuesday": return 3
-        case "wednesday": return 4
-        case "thursday": return 5
-        case "friday": return 6
-        case "saturday": return 7
-        default: return 2
-        }
+            ?? Job(weeklyCycleStartDay: "Monday")
+        let cycle = payCycle(for: job, at: shift.startDate)
+        return (cycle.start, cycle.end)
     }
 }
 

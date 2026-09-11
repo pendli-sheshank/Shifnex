@@ -15,6 +15,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.ViewModel
 import com.example.ui.theme.PrimaryGreen
+import com.schedulo.shared.logic.PayCycle
+import com.schedulo.shared.logic.payCycleFor as sharedPayCycleFor
+import com.schedulo.shared.logic.payCycleAtOffset as sharedPayCycleAtOffset
+import com.schedulo.shared.logic.defaultBiweeklyAnchorMillis
+import com.schedulo.shared.model.PayFrequency
+import com.schedulo.shared.model.Job as SharedJob
 import com.google.firebase.FirebaseApp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
@@ -43,25 +49,48 @@ data class Job(
     var goalHours: Double = 20.0,
     var goalType: String = "Hours", // "Hours" or "Earnings"
     var weeklyCycleStartDay: String? = "Monday", // "Monday", "Tuesday", etc.
+    // How long a pay period is: WEEKLY | BIWEEKLY | MONTHLY. Weekly by default so
+    // every job created before pay frequency existed keeps its current boundaries.
+    var payFrequency: String = PayFrequency.WEEKLY_VALUE,
+    // Start of one known pay period. Only BIWEEKLY reads it — a weekday alone can't
+    // say which of the two alternating weeks opens a period.
+    var payCycleAnchorMillis: Long? = null,
     var overtimeThresholdHours: Double = 40.0, // weekly hours after which overtime kicks in
     var overtimeMultiplier: Double = 1.5, // pay multiplier for overtime (e.g., 1.5x)
     var bonusAmount: Double = 0.0,
     var bonusReason: String = ""
 ) {
-    fun getStartOfCurrentCycle(targetMillis: Long = System.currentTimeMillis()): Long {
-        val calendar = Calendar.getInstance()
-        calendar.timeInMillis = targetMillis
-        calendar.set(Calendar.HOUR_OF_DAY, 0)
-        calendar.set(Calendar.MINUTE, 0)
-        calendar.set(Calendar.SECOND, 0)
-        calendar.set(Calendar.MILLISECOND, 0)
-
-        while (calendar.get(Calendar.DAY_OF_WEEK) != weekStartCalendarDay(weeklyCycleStartDay)) {
-            calendar.add(Calendar.DAY_OF_YEAR, -1)
-        }
-        return calendar.timeInMillis
-    }
+    fun getStartOfCurrentCycle(targetMillis: Long = System.currentTimeMillis()): Long =
+        payCycleFor(this, targetMillis).startMillis
 }
+
+// Bridges the Android Job onto the shared, unit-tested pay-cycle calculator. The
+// boundary math deliberately has exactly one implementation in the codebase: a wrong
+// boundary silently misstates someone's pay, and only the shared module has tests.
+private fun Job.toSharedJob(): SharedJob = SharedJob(
+    id = id,
+    userId = userId,
+    title = title,
+    isGigWork = isGigWork,
+    defaultHourlyRate = defaultHourlyRate,
+    goalHours = goalHours,
+    goalType = goalType,
+    weeklyCycleStartDay = weeklyCycleStartDay,
+    payFrequency = payFrequency,
+    payCycleAnchorMillis = payCycleAnchorMillis,
+    overtimeThresholdHours = overtimeThresholdHours,
+    overtimeMultiplier = overtimeMultiplier,
+    bonusAmount = bonusAmount,
+    bonusReason = bonusReason
+)
+
+/** The pay cycle containing [targetMillis] for [job], honouring its pay frequency. */
+fun payCycleFor(job: Job, targetMillis: Long): PayCycle =
+    sharedPayCycleFor(job.toSharedJob(), targetMillis)
+
+/** The pay cycle [offset] whole periods from the one containing [targetMillis]. */
+fun payCycleAtOffset(job: Job, targetMillis: Long, offset: Int): PayCycle =
+    sharedPayCycleAtOffset(job.toSharedJob(), targetMillis, offset)
 
 // Maps a stored week-start day name ("Friday") to its Calendar constant.
 // Payroll weeks are per-job fiscal weeks (job.weeklyCycleStartDay), never
@@ -78,18 +107,14 @@ fun weekStartCalendarDay(name: String?): Int = when (name?.lowercase(Locale.US) 
 }
 
 // Start-of-day of the most recent weekStartDay on or before the given moment.
-fun startOfWeekContaining(millis: Long, weekStartDay: String?): Long {
-    val calendar = Calendar.getInstance()
-    calendar.timeInMillis = millis
-    calendar.set(Calendar.HOUR_OF_DAY, 0)
-    calendar.set(Calendar.MINUTE, 0)
-    calendar.set(Calendar.SECOND, 0)
-    calendar.set(Calendar.MILLISECOND, 0)
-    while (calendar.get(Calendar.DAY_OF_WEEK) != weekStartCalendarDay(weekStartDay)) {
-        calendar.add(Calendar.DAY_OF_YEAR, -1)
-    }
-    return calendar.timeInMillis
-}
+// Deliberately always weekly: this backs the cross-job aggregate views (dashboard
+// "this week" card, widgets, unfiltered insights), which summarise a calendar-ish
+// week rather than any single employer's pay period.
+fun startOfWeekContaining(millis: Long, weekStartDay: String?): Long =
+    sharedPayCycleFor(
+        SharedJob(weeklyCycleStartDay = weekStartDay, payFrequency = PayFrequency.WEEKLY_VALUE),
+        millis
+    ).startMillis
 
 data class PayAdjustment(
     var id: String = java.util.UUID.randomUUID().toString(),
@@ -392,7 +417,7 @@ class DashboardViewModel : ViewModel() {
             }
     }
 
-    fun addJob(title: String, isGigWork: Boolean, defaultHourlyRate: Double, goalHours: Double, goalType: String, weeklyCycleStartDay: String = "Monday", overtimeThresholdHours: Double = 40.0, overtimeMultiplier: Double = 1.5, bonusAmount: Double = 0.0, bonusReason: String = "") {
+    fun addJob(title: String, isGigWork: Boolean, defaultHourlyRate: Double, goalHours: Double, goalType: String, weeklyCycleStartDay: String = "Monday", payFrequency: String = PayFrequency.WEEKLY_VALUE, payCycleAnchorMillis: Long? = null, overtimeThresholdHours: Double = 40.0, overtimeMultiplier: Double = 1.5, bonusAmount: Double = 0.0, bonusReason: String = "") {
         val uid = auth?.currentUser?.uid
         val database = db
         if (uid == null || database == null) {
@@ -408,6 +433,8 @@ class DashboardViewModel : ViewModel() {
             goalHours = goalHours.coerceAtLeast(0.0),
             goalType = goalType,
             weeklyCycleStartDay = weeklyCycleStartDay,
+            payFrequency = normalizePayFrequency(payFrequency),
+            payCycleAnchorMillis = resolveAnchor(payFrequency, payCycleAnchorMillis, weeklyCycleStartDay),
             overtimeThresholdHours = overtimeThresholdHours.coerceAtLeast(1.0),
             overtimeMultiplier = overtimeMultiplier.coerceAtLeast(1.0),
             bonusAmount = if (isGigWork) 0.0 else bonusAmount.coerceAtLeast(0.0),
@@ -421,7 +448,17 @@ class DashboardViewModel : ViewModel() {
             }
     }
 
-    fun updateJob(jobId: String, title: String, isGigWork: Boolean, defaultHourlyRate: Double, goalHours: Double, goalType: String, weeklyCycleStartDay: String, overtimeThresholdHours: Double = 40.0, overtimeMultiplier: Double = 1.5, bonusAmount: Double = 0.0, bonusReason: String = "") {
+    private fun normalizePayFrequency(raw: String?): String =
+        if (PayFrequency.isValid(raw)) raw!!.uppercase() else PayFrequency.WEEKLY_VALUE
+
+    // Biweekly is the only frequency that needs an anchor, and it needs a real one:
+    // leaving it null would let the boundary depend on when it was first evaluated.
+    // Persist the most recent cycle start day so the user can see and correct it.
+    private fun resolveAnchor(frequency: String?, supplied: Long?, weeklyCycleStartDay: String?): Long? =
+        if (PayFrequency.from(frequency) != PayFrequency.BIWEEKLY) null
+        else supplied ?: defaultBiweeklyAnchorMillis(weeklyCycleStartDay, System.currentTimeMillis())
+
+    fun updateJob(jobId: String, title: String, isGigWork: Boolean, defaultHourlyRate: Double, goalHours: Double, goalType: String, weeklyCycleStartDay: String, payFrequency: String = PayFrequency.WEEKLY_VALUE, payCycleAnchorMillis: Long? = null, overtimeThresholdHours: Double = 40.0, overtimeMultiplier: Double = 1.5, bonusAmount: Double = 0.0, bonusReason: String = "") {
         val job = jobs.value.find { it.id == jobId } ?: return
         val database = db ?: run {
             _syncError.value = "Please sign in to update employers."
@@ -434,6 +471,14 @@ class DashboardViewModel : ViewModel() {
             goalHours = goalHours.coerceAtLeast(0.0),
             goalType = goalType,
             weeklyCycleStartDay = weeklyCycleStartDay,
+            payFrequency = normalizePayFrequency(payFrequency),
+            // Keep the job's existing anchor when one is already stored, so editing an
+            // unrelated field can't silently shift every past pay period by a week.
+            payCycleAnchorMillis = resolveAnchor(
+                payFrequency,
+                payCycleAnchorMillis ?: job.payCycleAnchorMillis,
+                weeklyCycleStartDay
+            ),
             overtimeThresholdHours = overtimeThresholdHours.coerceAtLeast(1.0),
             overtimeMultiplier = overtimeMultiplier.coerceAtLeast(1.0),
             bonusAmount = if (isGigWork) 0.0 else bonusAmount.coerceAtLeast(0.0),
@@ -803,8 +848,9 @@ class DashboardViewModel : ViewModel() {
                 }
             }
 
-            val currentCycleStart = job.getStartOfCurrentCycle(now)
-            val currentCycleEnd = currentCycleStart + 7L * 24 * 60 * 60 * 1000L
+            val currentCycle = payCycleFor(job, now)
+            val currentCycleStart = currentCycle.startMillis
+            val currentCycleEnd = currentCycle.endMillis
             if (seenCycles.add(currentCycleStart)) {
                 val label = "${job.title}: ${weekFormat.format(Date(currentCycleStart))} – ${weekFormat.format(Date(currentCycleEnd - 1000L))} (Current)"
                 cycles.add(PayCycleOption(currentCycleStart, currentCycleEnd, job.title, label, 0, true))
