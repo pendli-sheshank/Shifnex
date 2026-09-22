@@ -11,6 +11,8 @@ struct JobsView: View {
     @State private var goalHoursStr = "20.0"
     @State private var goalType = "Hours"
     @State private var weeklyCycleStartDay = "Monday"
+    @State private var payFrequency = PayFrequency.weekly.rawValue
+    @State private var payCycleAnchorMillis: Int64? = nil
     @State private var overtimeThresholdStr = "40.0"
     @State private var overtimeMultiplierStr = "1.5"
     @State private var bonusAmountStr = "0.0"
@@ -18,6 +20,20 @@ struct JobsView: View {
     @State private var jobToDelete: Job?
 
     private let daysOfWeek = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    private let anchorFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "EEE, MMM dd"
+        return f
+    }()
+    // Pay-cycle range labels use the app-wide "MMM dd" form so every statement-style
+    // date reads the same across screens.
+    private let cycleRangeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "MMM dd"
+        return f
+    }()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -88,8 +104,9 @@ struct JobsView: View {
     // MARK: - Job Card
 
     private func jobCard(_ job: Job) -> some View {
-        let cycleStart = Date(timeIntervalSince1970: Double(job.getStartOfCurrentCycle()) / 1000.0)
-        let cycleEnd = Calendar.current.date(byAdding: .day, value: 7, to: cycleStart)!
+        let cycle = payCycle(for: job, at: Date())
+        let cycleStart = cycle.start
+        let cycleEnd = cycle.end
         let now = Date()
         let jobShifts = dashboardViewModel.shifts.filter {
             $0.company.lowercased() == job.title.lowercased() &&
@@ -164,9 +181,10 @@ struct JobsView: View {
                 }
 
                 if !job.isGigWork {
-                    let cycleStartDay = job.weeklyCycleStartDay ?? "Monday"
-                    let endDay = dayBefore(cycleStartDay)
-                    Text("Pay Cycle: \(cycleStartDay) to \(endDay)")
+                    // Show the real period rather than a fixed weekday pair: a monthly
+                    // job has no start weekday, and a biweekly one spans two weeks, so
+                    // a "Friday to Thursday" label would be wrong.
+                    Text("Pay Cycle: \(payCycleLabel(for: job, cycle: cycle))")
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundColor(.primaryGreen)
                         .padding(.top, 6)
@@ -207,9 +225,59 @@ struct JobsView: View {
                                 .frame(width: 100)
                         }
 
-                        Picker("Weekly Cycle Start Day", selection: $weeklyCycleStartDay) {
-                            ForEach(daysOfWeek, id: \.self) { day in
-                                Text(day).tag(day)
+                        Picker("Pay Frequency", selection: $payFrequency) {
+                            ForEach(PayFrequency.allCases, id: \.self) { freq in
+                                Text(freq.label).tag(freq.rawValue)
+                            }
+                        }
+                        .onChange(of: payFrequency) { newValue in
+                            // Offer a sensible starting fortnight the moment biweekly is
+                            // picked, so the field is never silently empty.
+                            if newValue == PayFrequency.biweekly.rawValue && payCycleAnchorMillis == nil {
+                                payCycleAnchorMillis = defaultBiweeklyAnchorMillis(
+                                    weeklyCycleStartDay: weeklyCycleStartDay
+                                )
+                            }
+                        }
+
+                        // Monthly pay periods are calendar months, so the start day is
+                        // meaningless there and is hidden rather than quietly ignored.
+                        if payFrequency != PayFrequency.monthly.rawValue {
+                            Picker("Cycle Start Day", selection: $weeklyCycleStartDay) {
+                                ForEach(daysOfWeek, id: \.self) { day in
+                                    Text(day).tag(day)
+                                }
+                            }
+                            .onChange(of: weeklyCycleStartDay) { newValue in
+                                // Re-anchor to the new day so boundaries stay on it.
+                                if payFrequency == PayFrequency.biweekly.rawValue {
+                                    payCycleAnchorMillis = defaultBiweeklyAnchorMillis(
+                                        weeklyCycleStartDay: newValue
+                                    )
+                                }
+                            }
+                        }
+
+                        // Which of the two alternating weeks opens a period can't be
+                        // derived from a weekday, so show the resolved one and let the
+                        // user shift it by a week if their employer is on the other.
+                        if payFrequency == PayFrequency.biweekly.rawValue {
+                            let anchor = payCycleAnchorMillis
+                                ?? defaultBiweeklyAnchorMillis(weeklyCycleStartDay: weeklyCycleStartDay)
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Current period started")
+                                        .font(.system(size: 12))
+                                        .foregroundColor(.secondary)
+                                    Text(anchorFormatter.string(
+                                        from: Date(timeIntervalSince1970: Double(anchor) / 1000.0)))
+                                        .font(.system(size: 15, weight: .semibold))
+                                }
+                                Spacer()
+                                Button("Shift a week") {
+                                    payCycleAnchorMillis = anchor - 7 * 24 * 60 * 60 * 1000
+                                }
+                                .font(.system(size: 14))
                             }
                         }
 
@@ -293,6 +361,8 @@ struct JobsView: View {
         goalHoursStr = "20.0"
         goalType = "Hours"
         weeklyCycleStartDay = "Monday"
+        payFrequency = PayFrequency.weekly.rawValue
+        payCycleAnchorMillis = nil
         overtimeThresholdStr = "40.0"
         overtimeMultiplierStr = "1.5"
         bonusAmountStr = "0.0"
@@ -307,6 +377,8 @@ struct JobsView: View {
         goalHoursStr = "\(job.goalHours)"
         goalType = job.goalType
         weeklyCycleStartDay = job.weeklyCycleStartDay ?? "Monday"
+        payFrequency = job.payFrequency
+        payCycleAnchorMillis = job.payCycleAnchorMillis
         overtimeThresholdStr = "\(job.overtimeThresholdHours)"
         overtimeMultiplierStr = "\(job.overtimeMultiplier)"
         bonusAmountStr = "\(job.bonusAmount)"
@@ -326,6 +398,7 @@ struct JobsView: View {
                 jobId: id, title: title, isGigWork: isGigWork,
                 defaultHourlyRate: finalRate, goalHours: finalGoal,
                 goalType: goalType, weeklyCycleStartDay: weeklyCycleStartDay,
+                payFrequency: payFrequency, payCycleAnchorMillis: payCycleAnchorMillis,
                 overtimeThresholdHours: finalOT, overtimeMultiplier: finalOTM,
                 bonusAmount: finalBonus, bonusReason: finalBonusReason
             )
@@ -334,9 +407,21 @@ struct JobsView: View {
                 title: title, isGigWork: isGigWork,
                 defaultHourlyRate: finalRate, goalHours: finalGoal,
                 goalType: goalType, weeklyCycleStartDay: weeklyCycleStartDay,
+                payFrequency: payFrequency, payCycleAnchorMillis: payCycleAnchorMillis,
                 overtimeThresholdHours: finalOT, overtimeMultiplier: finalOTM,
                 bonusAmount: finalBonus, bonusReason: finalBonusReason
             )
+        }
+    }
+
+    private func payCycleLabel(for job: Job, cycle: PayCycle) -> String {
+        switch PayFrequency.from(job.payFrequency) {
+        case .weekly:
+            let start = job.weeklyCycleStartDay ?? "Monday"
+            return "Weekly: \(start) to \(dayBefore(start))"
+        case .biweekly, .monthly:
+            let range = "\(cycleRangeFormatter.string(from: cycle.start)) – \(cycleRangeFormatter.string(from: cycle.lastInstant))"
+            return "\(PayFrequency.from(job.payFrequency).label): \(range)"
         }
     }
 

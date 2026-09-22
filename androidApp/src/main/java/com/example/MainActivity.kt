@@ -40,6 +40,8 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.fragment.app.FragmentActivity
 import com.example.ui.theme.*
+import com.schedulo.shared.logic.proRateWeeklyGoal
+import com.schedulo.shared.model.PayFrequency
 
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -788,9 +790,12 @@ private fun StatPill(label: String, value: String, modifier: Modifier = Modifier
 
 @Composable
 fun JobGoalTrackerCard(job: Job, shifts: List<Shift>, weekOffset: Int = 0) {
-    val cycleStart = job.getStartOfCurrentCycle() + weekOffset * 7 * 24 * 60 * 60 * 1000L
-    val cycleEnd = cycleStart + 7 * 24 * 60 * 60 * 1000L
+    // Step by whole cycles, not fixed weeks, so a biweekly or monthly job pages
+    // through real pay periods.
     val now = System.currentTimeMillis()
+    val cycle = payCycleAtOffset(job, now, weekOffset)
+    val cycleStart = cycle.startMillis
+    val cycleEnd = cycle.endMillis
 
     val shiftsForJob = shifts.filter {
         it.company.equals(job.title, ignoreCase = true) &&
@@ -805,7 +810,10 @@ fun JobGoalTrackerCard(job: Job, shifts: List<Shift>, weekOffset: Int = 0) {
 
     val isGig = job.isGigWork
     val isHoursGoal = job.goalType == "Hours"
-    val goalValue = job.goalHours
+    // goalHours is entered and stored as a WEEKLY target. Comparing it straight
+    // against a fortnight's or a month's totals would under-report progress by half
+    // or more, so scale it to the cycle's real length.
+    val goalValue = proRateWeeklyGoal(job.goalHours, cycle)
     val progressFraction = if (goalValue > 0) {
         val actualValue = if (isHoursGoal) hours else earnings
         (actualValue / goalValue).coerceIn(0.0, 1.0)
@@ -916,7 +924,7 @@ fun JobGoalTrackerCard(job: Job, shifts: List<Shift>, weekOffset: Int = 0) {
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    "Weekly ${job.goalType} Target",
+                    "${PayFrequency.label(job.payFrequency)} ${job.goalType} Target",
                     fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
